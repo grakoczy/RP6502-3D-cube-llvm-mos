@@ -6,8 +6,7 @@
 #include <inttypes.h>
 #include "colors.h"
 #include "usb_hid_keys.h"
-#include "bitmap_graphics.h"
-
+#include "bitmap_graphics_db.h"
 
 // XRAM locations
 #define KEYBOARD_INPUT 0xFF10 // KEYBOARD_BYTES of bitmask data
@@ -22,7 +21,7 @@ uint8_t keystates[KEYBOARD_BYTES] = {0};
 #define key(code) (keystates[code >> 3] & (1 << (code & 7)))
 
 // Simple 3D to 2D projection (scaled)
-#define SCALE 64
+uint8_t scale = 64;
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 
@@ -31,16 +30,22 @@ uint8_t keystates[KEYBOARD_BYTES] = {0};
 int16_t sine_values[NUM_POINTS];
 int16_t cosine_values[NUM_POINTS];
 
+// for double buffering
+uint16_t buffers[2];
+uint8_t active_buffer = 0;
+
 // Constants for fixed-point trigonometry
 enum {cA1 = 3370945099UL, cB1 = 2746362156UL, cC1 = 292421UL};
 enum {n = 13, p = 32, q = 31, r = 3, a = 12};
 
 // Function to calculate fixed-point sine
+// https://www.nullhardware.com/blog/fixed-point-sine-and-cosine-for-embedded-systems/
+//
 int16_t fpsin(int16_t i) {
     i <<= 1;
     uint8_t c = i < 0; // Set carry for output pos/neg
 
-    if(i == (i | 0x4000)) // Flip input value to corresponding value in range [0..8192)
+    if(i == (i | 0x4000)) // Flip input value to corresponding value in range [0..8192]
         i = (1 << 15) - i;
     i = (i & 0x7FFF) >> 1;
 
@@ -63,50 +68,10 @@ int16_t cube_vertices[8][3] = {
     {-4096, -4096, -4096}, {4096, -4096, -4096}, {4096, 4096, -4096}, {-4096, 4096, -4096},  // Back face
     {-4096, -4096,  4096}, {4096, -4096,  4096}, {4096, 4096,  4096}, {-4096, 4096,  4096}   // Front face
 };
-
-
-// Fast integer-based line drawing function
-void draw_line_f(uint8_t color, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1) {
-    // Calculate the differences
-    int8_t dx = x1 - x0;
-    int8_t dy = y1 - y0;
-
-    // Determine if we are stepping in positive or negative directions
-    int8_t sx = (dx > 0) ? 1 : -1;
-    int8_t sy = (dy > 0) ? 1 : -1;
-
-    // Absolute value of differences
-    dx = (dx > 0) ? dx : -dx;
-    dy = (dy > 0) ? dy : -dy;
-
-    // Error term, initialized to 0
-    int8_t err = (dx > dy ? dx : -dy) / 2;
-    int8_t e2;
-
-    while (1) {
-        // Draw the pixel at (x0, y0)
-        draw_pixel(color, x0, y0);
-
-        // Check if we've reached the endpoint
-        if (x0 == x1 && y0 == y1) {
-            break;
-        }
-
-        e2 = err;
-
-        // Update the error term and coordinates
-        if (e2 > -dx) {
-            err -= dy;
-            x0 += sx;
-        }
-
-        if (e2 < dy) {
-            err += dx;
-            y0 += sy;
-        }
-    }
-}
-
+int16_t cube_vertices_c[8][3] = {
+    {-4096, -4096, -4096}, {4096, -4096, -4096}, {4096, 4096, -4096}, {-4096, 4096, -4096},  // Back face
+    {-4096, -4096,  4096}, {4096, -4096,  4096}, {4096, 4096,  4096}, {-4096, 4096,  4096}   // Front face
+};
 
 void precompute_sin_cos() {
     int16_t angle_step = 32768 / NUM_POINTS; // 32768 is 2^15, representing 2*pi
@@ -117,10 +82,10 @@ void precompute_sin_cos() {
     }
 }
 
-
+// end coordinates in 2d space in the middle of canvas
 void project_3d_to_2d(int16_t vertex[3], int16_t* x2d, int16_t* y2d) {
-    *x2d = (vertex[0] / SCALE) + SCREEN_WIDTH / 2;
-    *y2d = (vertex[1] / SCALE) + SCREEN_HEIGHT / 2;
+    *x2d = (vertex[0] / scale) + SCREEN_WIDTH / 2;
+    *y2d = (vertex[1] / scale) + SCREEN_HEIGHT / 2;
 }
 
 // Rotate around X axis
@@ -148,111 +113,109 @@ void rotate_z(int16_t* x, int16_t* y, int angle) {
 }
 
 // Draw the cube by connecting the vertices with lines
-void draw_cube(int angleX, int angleY, int angleZ, int16_t color, uint8_t mode) {
+void draw_cube(int angleX, int angleY, int angleZ, int16_t color, uint8_t mode, uint16_t buffer_data_address) {
     int16_t x2d[8], y2d[8];
-
     // Rotate and project all vertices
     for (uint8_t i = 0; i < 8; i++) {
-        // printf("i: %i\n", i);
-        int16_t vertex[3] = {cube_vertices[i][0], cube_vertices[i][1], cube_vertices[i][2]};
 
+        int16_t vertex[3] = {cube_vertices[i][0], cube_vertices[i][1], cube_vertices[i][2]};
 
         // Apply rotations
         rotate_x(&vertex[1], &vertex[2], angleX);
         rotate_y(&vertex[0], &vertex[2], angleY);
         rotate_z(&vertex[0], &vertex[1], angleZ);
 
-
         // Project the 3D vertex to 2D
         project_3d_to_2d(vertex, &x2d[i], &y2d[i]);
         
     }
 
-    erase_canvas();
-
     // Connect the vertices with lines to draw the cube (front and back faces)
     if (mode == 0) {
-    draw_line(color, x2d[0], y2d[0], x2d[1], y2d[1]);
-    draw_line(color, x2d[1], y2d[1], x2d[2], y2d[2]);
-    draw_line(color, x2d[2], y2d[2], x2d[3], y2d[3]);
-    draw_line(color, x2d[3], y2d[3], x2d[0], y2d[0]);
-    draw_line(color, x2d[4], y2d[4], x2d[5], y2d[5]);
-    draw_line(color, x2d[5], y2d[5], x2d[6], y2d[6]);
-    draw_line(color, x2d[6], y2d[6], x2d[7], y2d[7]);
-    draw_line(color, x2d[7], y2d[7], x2d[4], y2d[4]);
-    draw_line(color, x2d[0], y2d[0], x2d[4], y2d[4]);
-    draw_line(color, x2d[1], y2d[1], x2d[5], y2d[5]);
-    draw_line(color, x2d[2], y2d[2], x2d[6], y2d[6]);
-    draw_line(color, x2d[3], y2d[3], x2d[7], y2d[7]);
+    draw_line2buffer(color, x2d[0], y2d[0], x2d[1], y2d[1], buffer_data_address);
+    draw_line2buffer(color, x2d[1], y2d[1], x2d[2], y2d[2], buffer_data_address);
+    draw_line2buffer(color, x2d[2], y2d[2], x2d[3], y2d[3], buffer_data_address);
+    draw_line2buffer(color, x2d[3], y2d[3], x2d[0], y2d[0], buffer_data_address);
+    draw_line2buffer(color, x2d[4], y2d[4], x2d[5], y2d[5], buffer_data_address);
+    draw_line2buffer(color, x2d[5], y2d[5], x2d[6], y2d[6], buffer_data_address);
+    draw_line2buffer(color, x2d[6], y2d[6], x2d[7], y2d[7], buffer_data_address);
+    draw_line2buffer(color, x2d[7], y2d[7], x2d[4], y2d[4], buffer_data_address);
+    draw_line2buffer(color, x2d[0], y2d[0], x2d[4], y2d[4], buffer_data_address);
+    draw_line2buffer(color, x2d[1], y2d[1], x2d[5], y2d[5], buffer_data_address);
+    draw_line2buffer(color, x2d[2], y2d[2], x2d[6], y2d[6], buffer_data_address);
+    draw_line2buffer(color, x2d[3], y2d[3], x2d[7], y2d[7], buffer_data_address);
     }
     if (mode == 1) {
-        draw_pixel(color, x2d[0], y2d[0]);
-        draw_pixel(color, x2d[1], y2d[1]);
-        draw_pixel(color, x2d[2], y2d[2]);
-        draw_pixel(color, x2d[3], y2d[3]);
-        draw_pixel(color, x2d[4], y2d[4]);
-        draw_pixel(color, x2d[5], y2d[5]);
-        draw_pixel(color, x2d[6], y2d[6]);
-        draw_pixel(color, x2d[7], y2d[7]);
-        draw_pixel(color, x2d[0], y2d[0]);
-        draw_pixel(color, x2d[1], y2d[1]);
-        draw_pixel(color, x2d[2], y2d[2]);
-        draw_pixel(color, x2d[3], y2d[3]);
+        draw_pixel2buffer(color, x2d[0], y2d[0], buffer_data_address);
+        draw_pixel2buffer(color, x2d[1], y2d[1], buffer_data_address);
+        draw_pixel2buffer(color, x2d[2], y2d[2], buffer_data_address);
+        draw_pixel2buffer(color, x2d[3], y2d[3], buffer_data_address);
+        draw_pixel2buffer(color, x2d[4], y2d[4], buffer_data_address);
+        draw_pixel2buffer(color, x2d[5], y2d[5], buffer_data_address);
+        draw_pixel2buffer(color, x2d[6], y2d[6], buffer_data_address);
+        draw_pixel2buffer(color, x2d[7], y2d[7], buffer_data_address);
+        draw_pixel2buffer(color, x2d[0], y2d[0], buffer_data_address);
+        draw_pixel2buffer(color, x2d[1], y2d[1], buffer_data_address);
+        draw_pixel2buffer(color, x2d[2], y2d[2], buffer_data_address);
+        draw_pixel2buffer(color, x2d[3], y2d[3], buffer_data_address);
     }
 
-    // int d = 0;
-    // while (d < 1000) {
-    //     d++;
-    //     draw_pixel(BLACK, 0, 0);
-    // }
-
-
 }
-
 
 int main() {
     
     bool handled_key = false;
     bool paused = true;
+    bool show_buffers_indicators = false;
     uint8_t mode = 0;
     uint8_t i = 0;
 
-    init_bitmap_graphics(0xFF00, 0x0000, 0, 1, SCREEN_WIDTH, SCREEN_HEIGHT, 1);
+    init_bitmap_graphics(0xFF00, buffers[active_buffer], 0, 1, SCREEN_WIDTH, SCREEN_HEIGHT, 1);
+    // assign address for each buffer
+    buffers[0] = 0x0000;
+    buffers[1] = 0x2580;
+    erase_buffer(buffers[active_buffer]);
+    erase_buffer(buffers[!active_buffer]);
 
-    erase_canvas();
-    
-    printf("Precomputing sine and cosine values...\n");
+    active_buffer = 0;
+    switch_buffer(buffers[active_buffer]);
+
     // Precompute sine and cosine values
+    set_cursor(10, 220);
+    draw_string2buffer("Precomputing sine and cosine values...", buffers[active_buffer]);
     precompute_sin_cos();
-
-    int angleX = 10, angleY = 10, angleZ = 10;
-
-    printf("Start drawing\n");
-
-    // Draw the rotating cube
-    draw_cube(angleX, angleY, angleZ, WHITE, mode);
+    erase_buffer(buffers[active_buffer]);
 
     set_cursor(10, 220);
-    draw_string("Press SPACE to start/stop");
+    draw_string2buffer("Press SPACE to start/stop", buffers[active_buffer]);
     set_cursor(10, 230);
-    draw_string("Press 1 or 2 to change drawing style");
+    draw_string2buffer("Press 1 or 2 to change drawing style", buffers[active_buffer]);
 
+    // start angles
+    int angleX = 30, angleY = 30, angleZ = 30;
+    draw_cube(angleX, angleY, angleZ, WHITE, mode, buffers[active_buffer]);
 
     while (true) {
 
-
-       // Update rotation angles
-
         if (!paused) {
 
+           // Update rotation angles
             angleX = (angleX + 1) % NUM_POINTS;
             angleY = (angleY + 1) % NUM_POINTS;
             angleZ = (angleZ + 1) % NUM_POINTS;
 
-            // printf("angleX: %i, angleY: %i, angleZ: %i\n", angleX, angleY, angleZ);
+            // draw on inactive buffer
+            erase_buffer(buffers[!active_buffer]);
+            draw_cube(angleX, angleY, angleZ, WHITE, mode, buffers[!active_buffer]);
+            if(show_buffers_indicators){
+                draw_circle2buffer(WHITE, (active_buffer ? SCREEN_WIDTH - 20 : 20), 20, 8, buffers[!active_buffer]);
+                set_cursor((active_buffer ? SCREEN_WIDTH - 22 : 18), 17);
+                draw_string2buffer((active_buffer ? "0" : "1"), buffers[!active_buffer]);
+            }
+            switch_buffer(buffers[!active_buffer]);
+            // change active buffer
+            active_buffer = !active_buffer;
 
-            // Draw the rotating cube
-            draw_cube(angleX, angleY, angleZ, WHITE, mode);
         }
 
         xregn( 0, 0, 0, 1, KEYBOARD_INPUT);
@@ -269,7 +232,7 @@ int main() {
             for (j = 0; j < 8; j++) {
                 uint8_t new_key = (new_keys & (1<<j));
                 if ((((i<<3)+j)>3) && (new_key != (keystates[i] & (1<<j)))) {
-                    printf( "key %d %s\n", ((i<<3)+j), (new_key ? "pressed" : "released"));
+                    // printf( "key %d %s\n", ((i<<3)+j), (new_key ? "pressed" : "released"));
                 }
             }
 
@@ -282,12 +245,29 @@ int main() {
                 // handle the keystrokes
                 if (key(KEY_SPACE)) {
                     paused = !paused;
+                    if(paused){
+                        set_cursor(10, 220);
+                        draw_string2buffer("Press SPACE to start", buffers[active_buffer]);
+                    }
                 }
                 if (key(KEY_1)) {
                     mode = 0;
                 }
                 if (key(KEY_2)) {
                     mode = 1;
+                }
+                if (key(KEY_3)) {
+                    show_buffers_indicators = !show_buffers_indicators;
+                }
+                if (key(KEY_EQUAL)){
+                    if (scale >= 64){
+                        scale-=5;
+                    }
+                }
+                if (key(KEY_MINUS)){
+                    if (scale <= 200){
+                        scale+=5;
+                    }
                 }
                 if (key(KEY_ESC)) {
                     break;

@@ -7,6 +7,6 @@ add_executable(cube)
 rp6502_executable(cube)
 target_sources(cube PRIVATE
     src/colors.c
-    src/bitmap_graphics.c
+    src/bitmap_graphics_db.c
     src/main.c
 )
