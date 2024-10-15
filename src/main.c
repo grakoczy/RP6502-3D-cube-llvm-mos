@@ -262,7 +262,7 @@ void player_movement() {
     if (!(keystates[0] & 1)) {
         if (!handled_key) { // handle only once per single keypress
             // handle the keystrokes
-            if (key(KEY_W)) {
+            if (key(KEY_W)) { 
                 player.x += speed_cos;
                 player.y += speed_sin;
             }
