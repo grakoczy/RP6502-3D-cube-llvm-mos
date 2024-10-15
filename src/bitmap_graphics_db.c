@@ -113,8 +113,8 @@ void init_bitmap_graphics(uint16_t canvas_struct_address,
         canvas_h = 124; // max for 16-bit color
     } else if (bpp_mode_to_bpp[bpp_mode] == 8) { // bits color
         canvas_mode = 2;
-        canvas_w = 320; // max for 8-bit color
-        canvas_h = 180; // max for 8-bit color
+        canvas_w = 240; // max for 8-bit color
+        canvas_h = 124; // max for 8-bit color
     } else if (bpp_mode_to_bpp[bpp_mode] == 4) { // bits color
         canvas_w = 320; // max for 4-bit color
         if (canvas_mode > 2) {
@@ -171,7 +171,8 @@ void init_bitmap_graphics(uint16_t canvas_struct_address,
     //xreg_vga_mode(3, bpp_mode, canvas_struct, plane); // bitmap mode
     xregn(1, 0, 1, 4, 3, bpp_mode, canvas_struct, plane);
 
-    // printf("canvas_mode: %i, bpp_mode: %i, canvas_struct: %i, plane: %i\n", canvas_mode, canvas_struct, plane);
+    printf("canvas_mode: %i, bpp_mode: %i, canvas_struct: %i, plane: %i\n", canvas_mode, bpp_mode, plane);
+    printf("canvas_w: %i, canvas_h: %i\n", canvas_w, canvas_h);
 
     //xreg_vga_mode(0, 1); // console
 }
